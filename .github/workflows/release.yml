@@ -9,6 +9,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -22,6 +24,12 @@ jobs:
           tag="${GITHUB_REF#refs/tags/}"
           manifest_version="$(node -p "require('./manifest.json').version")"
           test "$tag" = "$manifest_version"
+      - name: Attest release assets
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            main.js
+            styles.css
       - name: Create draft release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
