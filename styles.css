@@ -1,0 +1,27 @@
+.gcs-pull-file-list {
+	box-sizing: border-box;
+	width: min(100%, 36rem);
+	height: 10rem;
+	margin-top: var(--size-2-2);
+	overflow-x: hidden;
+	overflow-y: auto;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	background: var(--background-primary-alt);
+}
+
+.gcs-pull-file-row {
+	box-sizing: border-box;
+	min-height: 1.75rem;
+	padding: var(--size-2-1) var(--size-4-2);
+	overflow: hidden;
+	border-bottom: 1px solid var(--background-modifier-border);
+	font-family: var(--font-monospace);
+	line-height: 1.25rem;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.gcs-pull-file-row:last-child {
+	border-bottom: 0;
+}

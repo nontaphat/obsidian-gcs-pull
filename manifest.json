@@ -1,0 +1,9 @@
+{
+	"id": "gcs-pull",
+	"name": "GCS Pull",
+	"version": "0.1.0",
+	"minAppVersion": "1.13.0",
+	"description": "Preview and pull files from Google Cloud Storage without changing remote objects.",
+	"author": "Nontaphat",
+	"isDesktopOnly": true
+}
