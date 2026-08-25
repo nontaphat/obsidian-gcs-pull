@@ -1,5 +1,9 @@
 # GCS Pull
 
+<p align="center">
+	<img src="./assets/gcs-pull-logo.png" alt="GCS Pull logo" width="180">
+</p>
+
 GCS Pull is an Obsidian desktop plugin for previewing and downloading files from Google Cloud Storage into a vault. Google Cloud Storage is always the source: the plugin contains no remote upload or delete operation.
 
 GCS Pull is an independent community plugin and is not affiliated with or endorsed by Google or Obsidian.
