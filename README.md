@@ -8,9 +8,13 @@ GCS Pull is an Obsidian desktop plugin for previewing and downloading files from
 
 GCS Pull is an independent community plugin and is not affiliated with or endorsed by Google or Obsidian.
 
+## Installation
+
+Install **GCS Pull** from **Settings → Community plugins**.
+
 ## Safety behavior
 
-- **Preview GCS pull** shows exactly how many remote files will be downloaded before writing anything.
+- **Preview changes** shows exactly how many remote files will be downloaded before writing anything.
 - A persistent progress notice shows file-count completion and percentage during a manual pull.
 - New remote files are downloaded into the configured vault folder.
 - A remote-only update replaces the local file without creating an unnecessary backup.
@@ -73,45 +77,6 @@ The OAuth client ID, client secret, refresh token, settings, and pull baseline a
 
 - **Preview changes** — scan and calculate changes without writing files.
 - **Pull files** — scan again and apply the current remote generations.
-
-## Development
-
-Use a dedicated test vault. Do not test development builds in your main vault.
-
-```bash
-npm install
-npm run dev
-```
-
-Quality checks:
-
-```bash
-npm run lint
-npm test
-npm run build
-npm run check
-```
-
-The production build creates `main.js` at the repository root.
-
-## Manual installation
-
-Copy these files into `<Vault>/.obsidian/plugins/gcs-pull/`:
-
-- `main.js`
-- `manifest.json`
-- `styles.css`
-
-Reload Obsidian and enable **GCS Pull** under **Settings → Community plugins**.
-
-## Release
-
-1. Run `npm run check`.
-2. Run `npm version patch`, `npm version minor`, or `npm version major`.
-3. Push the commit and version tag without a leading `v`.
-4. Review and publish the draft GitHub release.
-
-The release tag must exactly match `manifest.json`. Release assets are `main.js`, `manifest.json`, and `styles.css`.
 
 ## License
 
