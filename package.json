@@ -1,6 +1,6 @@
 {
 	"name": "gcs-pull",
-	"version": "0.1.1",
+	"version": "0.1.2",
 	"description": "Preview and pull files from Google Cloud Storage into an Obsidian vault.",
 	"main": "main.js",
 	"type": "module",

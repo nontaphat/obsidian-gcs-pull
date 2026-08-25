@@ -7,7 +7,9 @@ Report vulnerabilities through GitHub Security Advisories after the repository i
 - The release bundle contains GCS list and download operations only.
 - Google OAuth requests the `devstorage.read_only` scope.
 - The plugin never uploads, replaces, or deletes GCS objects.
-- Remote deletion never deletes a local file.
+- Safe pull never deletes a local file after remote deletion.
+- Optional mirror mode moves only previously tracked files to Obsidian's configured trash after remote deletion.
+- Mirror mode never removes local-only or excluded files and requires explicit destructive auto-pull opt-in.
 - Remote paths are validated before any vault write.
 - Case-insensitive and Unicode-normalized path collisions are rejected.
 - Writes into the vault configuration directory are rejected.

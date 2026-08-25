@@ -1,8 +1,9 @@
 import type { GcsObject } from "../gcs/GcsReadClient";
 import type { LocalTarget } from "../local/LocalTarget";
 import { sha256 } from "../util/hash";
+import type { PullMode } from "../settings";
 import { isExcludedPath } from "./exclusions";
-import { PullBaseline, PullIssue, PullPlan, PullPlanItem, PullRunResult } from "./types";
+import { PullBaseline, PullIssue, PullPlan, PullPlanItem, PullRunResult, PullTrashItem } from "./types";
 
 export interface RemoteReader {
 	list(): Promise<GcsObject[]>;
@@ -26,7 +27,8 @@ export class PullEngine {
 		private readonly local: LocalTarget,
 		private readonly now: () => Date = () => new Date(),
 		private readonly cancelled: () => boolean = () => false,
-		private readonly excludedFolders: readonly string[] = []
+		private readonly excludedFolders: readonly string[] = [],
+		private readonly mode: PullMode = "safe"
 	) {}
 
 	async preview(previous: PullBaseline): Promise<PullPlan> {
@@ -34,9 +36,11 @@ export class PullEngine {
 		if (this.cancelled()) throw new Error("Pull cancelled because the plugin unloaded.");
 		const issues: PullIssue[] = [];
 		const resolved: ResolvedObject[] = [];
+		const listedPaths = new Set<string>();
 		let excluded = 0;
 
 		for (const remote of remoteObjects) {
+			listedPaths.add(remote.relativePath);
 			if (isExcludedPath(remote.relativePath, this.excludedFolders)) {
 				excluded += 1;
 				continue;
@@ -60,6 +64,7 @@ export class PullEngine {
 		let unchanged = 0;
 		let newFiles = 0;
 		let updatedFiles = 0;
+		let localEditsToReplace = 0;
 		let backupExpected = 0;
 
 		for (const item of resolved) {
@@ -72,8 +77,26 @@ export class PullEngine {
 			try {
 				const exists = await this.local.exists(item.destination);
 				if (exists && prior?.generation === item.remote.generation) {
-					unchanged += 1;
-					unchangedBaseline[item.remote.relativePath] = prior;
+					if (this.mode === "safe") {
+						unchanged += 1;
+						unchangedBaseline[item.remote.relativePath] = prior;
+						continue;
+					}
+					const localHash = await sha256(await this.local.read(item.destination));
+					if (localHash === prior.localHash) {
+						unchanged += 1;
+						unchangedBaseline[item.remote.relativePath] = prior;
+						continue;
+					}
+					localEditsToReplace += 1;
+					backupExpected += 1;
+					items.push({
+						remote: item.remote,
+						destination: item.destination,
+						previous: prior,
+						kind: "restore",
+						backupExpected: true,
+					});
 					continue;
 				}
 				if (!exists) {
@@ -98,34 +121,68 @@ export class PullEngine {
 			}
 		}
 
+		const trashItems: PullTrashItem[] = [];
+		if (this.mode === "mirror") {
+			for (const [relativePath, prior] of Object.entries(previous)) {
+				if (listedPaths.has(relativePath) || isExcludedPath(relativePath, this.excludedFolders)) continue;
+				try {
+					const destination = this.local.resolve(relativePath).path;
+					if (await this.local.exists(destination)) trashItems.push({ relativePath, destination, previous: prior });
+				} catch (error) {
+					issues.push({ path: relativePath, message: this.message(error) });
+					unchangedBaseline[relativePath] = prior;
+				}
+			}
+		}
+
 		return {
 			scanned: remoteObjects.length,
 			excluded,
 			toPull: items.length,
 			newFiles,
 			updatedFiles,
+			localEditsToReplace,
+			toTrash: trashItems.length,
 			unchanged,
 			backupExpected,
 			errorCount: issues.length,
 			items,
+			trashItems,
 			issues,
 			unchangedBaseline,
 		};
 	}
 
-	async apply(plan: PullPlan, onProgress?: (progress: PullProgress) => void): Promise<PullRunResult> {
+	async apply(plan: PullPlan, onProgress?: (progress: PullProgress) => void, allowDestructive = true): Promise<PullRunResult> {
 		const baseline: PullBaseline = { ...plan.unchangedBaseline };
 		const issues = [...plan.issues];
 		const files: string[] = [];
+		const trashedFiles: string[] = [];
 		let downloadedNew = 0;
 		let downloadedUpdated = 0;
+		let restoredLocal = 0;
+		let movedToTrash = 0;
+		let destructiveDeferred = 0;
 		let alreadyCurrent = 0;
 		let backupsCreated = 0;
 
-		let completed = 0;
+		const applicableItems = plan.items.filter((item) => item.kind !== "restore" || allowDestructive);
 		for (const item of plan.items) {
+			if (item.kind === "restore" && !allowDestructive) {
+				destructiveDeferred += 1;
+				if (item.previous) baseline[item.remote.relativePath] = item.previous;
+			}
+		}
+		const mayTrash = allowDestructive && issues.length === 0;
+		const progressTotal = applicableItems.length + (mayTrash ? plan.trashItems.length : 0);
+		let completed = 0;
+		for (let index = 0; index < applicableItems.length; index += 1) {
+			const item = applicableItems[index]!;
 			if (this.cancelled()) {
 				issues.push({ path: item.remote.relativePath, message: "Pull cancelled because the plugin unloaded." });
+				for (const pending of applicableItems.slice(index)) {
+					if (pending.previous) baseline[pending.remote.relativePath] = pending.previous;
+				}
 				break;
 			}
 			try {
@@ -148,7 +205,8 @@ export class PullEngine {
 				}
 
 				await this.local.write(item.destination, remoteBytes);
-				if (exists) downloadedUpdated += 1;
+				if (item.kind === "restore") restoredLocal += 1;
+				else if (exists) downloadedUpdated += 1;
 				else downloadedNew += 1;
 				files.push(item.remote.relativePath);
 				baseline[item.remote.relativePath] = { generation: item.remote.generation, localHash: remoteHash };
@@ -157,8 +215,37 @@ export class PullEngine {
 				if (item.previous) baseline[item.remote.relativePath] = item.previous;
 			} finally {
 				completed += 1;
-				onProgress?.({ completed, total: plan.items.length });
+				onProgress?.({ completed, total: progressTotal });
 			}
+		}
+
+		const canTrash = mayTrash && issues.length === 0;
+		if (canTrash) {
+			for (let index = 0; index < plan.trashItems.length; index += 1) {
+				const item = plan.trashItems[index]!;
+				if (this.cancelled()) {
+					issues.push({ path: item.relativePath, message: "Pull cancelled because the plugin unloaded." });
+					this.deferTrash(plan.trashItems.slice(index), baseline);
+					destructiveDeferred += plan.trashItems.length - index;
+					break;
+				}
+				try {
+					await this.local.trash(item.destination);
+					movedToTrash += 1;
+					trashedFiles.push(item.relativePath);
+				} catch (error) {
+					issues.push({ path: item.relativePath, message: this.message(error) });
+					this.deferTrash(plan.trashItems.slice(index), baseline);
+					destructiveDeferred += plan.trashItems.length - index;
+					break;
+				} finally {
+					completed += 1;
+					onProgress?.({ completed, total: progressTotal });
+				}
+			}
+		} else {
+			destructiveDeferred += plan.trashItems.length;
+			this.deferTrash(plan.trashItems, baseline);
 		}
 
 		return {
@@ -166,11 +253,15 @@ export class PullEngine {
 			excluded: plan.excluded,
 			downloadedNew,
 			downloadedUpdated,
+			restoredLocal,
+			movedToTrash,
+			destructiveDeferred,
 			alreadyCurrent,
 			unchanged: plan.unchanged,
 			backupsCreated,
 			errorCount: issues.length,
 			files,
+			trashedFiles,
 			issues,
 			baseline,
 		};
@@ -178,5 +269,9 @@ export class PullEngine {
 
 	private message(error: unknown): string {
 		return error instanceof Error ? error.message : String(error);
+	}
+
+	private deferTrash(items: PullTrashItem[], baseline: PullBaseline): void {
+		for (const item of items) baseline[item.relativePath] = item.previous;
 	}
 }

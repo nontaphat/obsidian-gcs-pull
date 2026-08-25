@@ -19,11 +19,17 @@ Install **GCS Pull** from **Settings → Community plugins**.
 - New remote files are downloaded into the configured vault folder.
 - A remote-only update replaces the local file without creating an unnecessary backup.
 - If both the local file and its remote generation changed, the local content is preserved as a timestamped `.conflict-*` backup before replacement.
-- A local edit is retained while the remote generation remains unchanged.
-- Remote deletion never deletes the retained local file.
+- Safe pull retains a local edit while the remote generation remains unchanged.
+- Safe pull retains local files when their remote objects are deleted.
 - Ambiguous, unsafe, or colliding remote paths are rejected.
 - Configured bucket folders can be excluded from previews, manual pulls, and automatic pulls.
 - The vault configuration directory is always excluded.
+
+## Pull behavior
+
+**Safe pull** is the default. It downloads new and remotely updated files while retaining local edits and files whose remote objects were deleted.
+
+**Mirror tracked files** uses GCS as the source of truth only for files previously pulled by this plugin. It backs up and replaces local edits, and moves tracked files to Obsidian's configured trash when their remote objects are deleted. Local-only and excluded files are never removed. Manual mirror changes require confirmation. Destructive automatic pulls require a separate opt-in.
 
 ## Requirements
 
@@ -56,9 +62,12 @@ The settings tab records separate counts for:
 - files to pull;
 - new files;
 - updated files;
+- local edits to replace;
+- tracked files to move to trash;
 - unchanged remote generations;
 - expected and created conflict backups;
-- already-current content; and
+- already-current content;
+- completed and deferred destructive changes; and
 - all errors, while displaying the first 20 details.
 
 ## Network and privacy disclosure

@@ -7,6 +7,7 @@ import { PullEngine } from "./pull/PullEngine";
 import { parseExcludedFolders } from "./pull/exclusions";
 import { PullPlan } from "./pull/types";
 import { DEFAULT_SETTINGS, PluginSettings, loadSettings } from "./settings";
+import { confirmMirrorPull } from "./ui/ConfirmModal";
 import { GoogleGcsPullSettingsTab } from "./ui/SettingsTab";
 
 export default class GoogleGcsPullPlugin extends Plugin {
@@ -68,22 +69,11 @@ export default class GoogleGcsPullPlugin extends Plugin {
 			const scopeKey = this.currentScopeKey();
 			const engine = this.createEngine();
 			const plan = await engine.preview(this.activeBaseline(scopeKey));
-			this.settings.lastPreview = {
-				at: Date.now(),
-				scanned: plan.scanned,
-				excluded: plan.excluded,
-				toPull: plan.toPull,
-				newFiles: plan.newFiles,
-				updatedFiles: plan.updatedFiles,
-				unchanged: plan.unchanged,
-				backupExpected: plan.backupExpected,
-				errorCount: plan.errorCount,
-				issues: plan.issues.slice(0, 20),
-			};
-			await this.saveSettings();
+			await this.storePreview(plan);
 			new Notice(
 				`GCS Pull: ${plan.toPull} file${plan.toPull === 1 ? "" : "s"} to pull ` +
-					`(${plan.newFiles} new, ${plan.updatedFiles} updated, ${plan.backupExpected} backups, ${plan.excluded} excluded).`
+					`(${plan.newFiles} new, ${plan.updatedFiles} updated, ${plan.localEditsToReplace} local edits, ` +
+					`${plan.toTrash} to trash, ${plan.backupExpected} backups, ${plan.excluded} excluded).`
 			);
 			return plan;
 		} catch (error) {
@@ -95,6 +85,8 @@ export default class GoogleGcsPullPlugin extends Plugin {
 				toPull: 0,
 				newFiles: 0,
 				updatedFiles: 0,
+				localEditsToReplace: 0,
+				toTrash: 0,
 				unchanged: 0,
 				backupExpected: 0,
 				errorCount: 1,
@@ -110,15 +102,30 @@ export default class GoogleGcsPullPlugin extends Plugin {
 
 	async pullNow(automatic: boolean): Promise<void> {
 		if (!this.beginOperation(automatic)) return;
-		const progressNotice = automatic ? null : new Notice("GCS Pull: scanning GCS…", 0);
+		let progressNotice = automatic ? null : new Notice("GCS Pull: scanning GCS…", 0);
 		try {
 			const scopeKey = this.currentScopeKey();
 			const engine = this.createEngine();
 			const plan = await engine.preview(this.activeBaseline(scopeKey));
-			this.updateProgressNotice(progressNotice, 0, plan.toPull);
+			await this.storePreview(plan);
+			const hasMirrorChanges = plan.localEditsToReplace > 0 || (plan.toTrash > 0 && plan.errorCount === 0);
+			if (!automatic && hasMirrorChanges) {
+				progressNotice?.hide();
+				progressNotice = null;
+				if (!(await confirmMirrorPull(this.app, plan))) {
+					new Notice("GCS Pull: mirror changes cancelled.");
+					return;
+				}
+				progressNotice = new Notice("GCS Pull: preparing mirror changes…", 0);
+			}
+			const allowDestructive = !automatic || this.settings.allowDestructiveAutoPull;
+			const progressTotal =
+				plan.items.filter((item) => item.kind !== "restore" || allowDestructive).length +
+				(allowDestructive && plan.errorCount === 0 ? plan.toTrash : 0);
+			this.updateProgressNotice(progressNotice, 0, progressTotal);
 			const result = await engine.apply(plan, ({ completed, total }) => {
 				this.updateProgressNotice(progressNotice, completed, total);
-			});
+			}, allowDestructive);
 			if (this.currentScopeKey() === scopeKey) {
 				this.settings.scopeKey = scopeKey;
 				this.settings.baseline = result.baseline;
@@ -126,36 +133,29 @@ export default class GoogleGcsPullPlugin extends Plugin {
 				this.settings.scopeKey = "";
 				this.settings.baseline = {};
 			}
-			this.settings.lastPreview = {
-				at: Date.now(),
-				scanned: plan.scanned,
-				excluded: plan.excluded,
-				toPull: plan.toPull,
-				newFiles: plan.newFiles,
-				updatedFiles: plan.updatedFiles,
-				unchanged: plan.unchanged,
-				backupExpected: plan.backupExpected,
-				errorCount: plan.errorCount,
-				issues: plan.issues.slice(0, 20),
-			};
 			this.settings.lastRun = {
 				at: Date.now(),
 				scanned: result.scanned,
 				excluded: result.excluded,
 				downloadedNew: result.downloadedNew,
 				downloadedUpdated: result.downloadedUpdated,
+				restoredLocal: result.restoredLocal,
+				movedToTrash: result.movedToTrash,
+				destructiveDeferred: result.destructiveDeferred,
 				alreadyCurrent: result.alreadyCurrent,
 				unchanged: result.unchanged,
 				backupsCreated: result.backupsCreated,
 				errorCount: result.errorCount,
 				files: result.files.slice(-50),
+				trashedFiles: result.trashedFiles.slice(-50),
 				issues: result.issues.slice(0, 20),
 			};
 			await this.saveSettings();
 			if (!automatic || result.errorCount > 0) {
 				new Notice(
 					`GCS Pull: downloaded ${result.downloadedNew} new and ${result.downloadedUpdated} updated ` +
-						`files; ${result.backupsCreated} backups; ${result.errorCount} errors.`
+					`files; restored ${result.restoredLocal}; trashed ${result.movedToTrash}; deferred ` +
+					`${result.destructiveDeferred}; ${result.backupsCreated} backups; ${result.errorCount} errors.`
 				);
 			}
 		} catch (error) {
@@ -166,11 +166,15 @@ export default class GoogleGcsPullPlugin extends Plugin {
 				excluded: 0,
 				downloadedNew: 0,
 				downloadedUpdated: 0,
+				restoredLocal: 0,
+				movedToTrash: 0,
+				destructiveDeferred: 0,
 				alreadyCurrent: 0,
 				unchanged: 0,
 				backupsCreated: 0,
 				errorCount: 1,
 				files: [],
+				trashedFiles: [],
 				issues: [{ path: "/", message }],
 			};
 			await this.saveSettings();
@@ -179,6 +183,24 @@ export default class GoogleGcsPullPlugin extends Plugin {
 			progressNotice?.hide();
 			this.operationRunning = false;
 		}
+	}
+
+	private async storePreview(plan: PullPlan): Promise<void> {
+		this.settings.lastPreview = {
+			at: Date.now(),
+			scanned: plan.scanned,
+			excluded: plan.excluded,
+			toPull: plan.toPull,
+			newFiles: plan.newFiles,
+			updatedFiles: plan.updatedFiles,
+			localEditsToReplace: plan.localEditsToReplace,
+			toTrash: plan.toTrash,
+			unchanged: plan.unchanged,
+			backupExpected: plan.backupExpected,
+			errorCount: plan.errorCount,
+			issues: plan.issues.slice(0, 20),
+		};
+		await this.saveSettings();
 	}
 
 	private createEngine(): PullEngine {
@@ -192,7 +214,8 @@ export default class GoogleGcsPullPlugin extends Plugin {
 			local,
 			() => new Date(),
 			() => this.unloaded,
-			parseExcludedFolders(this.settings.excludedFolders)
+			parseExcludedFolders(this.settings.excludedFolders),
+			this.settings.pullMode
 		);
 	}
 
@@ -248,6 +271,6 @@ export default class GoogleGcsPullPlugin extends Plugin {
 	private updateProgressNotice(notice: Notice | null, completed: number, total: number): void {
 		if (!notice) return;
 		const percent = total === 0 ? 100 : Math.round((completed / total) * 100);
-		notice.setMessage(`GCS Pull: pulling ${completed}/${total} files (${percent}%)`);
+		notice.setMessage(`GCS Pull: applying ${completed}/${total} changes (${percent}%)`);
 	}
 }

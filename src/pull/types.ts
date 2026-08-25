@@ -16,8 +16,14 @@ export interface PullPlanItem {
 	remote: GcsObject;
 	destination: string;
 	previous?: FileBaseline;
-	kind: "new" | "update";
+	kind: "new" | "update" | "restore";
 	backupExpected: boolean;
+}
+
+export interface PullTrashItem {
+	relativePath: string;
+	destination: string;
+	previous: FileBaseline;
 }
 
 export interface PullPlanSummary {
@@ -26,6 +32,8 @@ export interface PullPlanSummary {
 	toPull: number;
 	newFiles: number;
 	updatedFiles: number;
+	localEditsToReplace: number;
+	toTrash: number;
 	unchanged: number;
 	backupExpected: number;
 	errorCount: number;
@@ -33,6 +41,7 @@ export interface PullPlanSummary {
 
 export interface PullPlan extends PullPlanSummary {
 	items: PullPlanItem[];
+	trashItems: PullTrashItem[];
 	issues: PullIssue[];
 	unchangedBaseline: PullBaseline;
 }
@@ -42,11 +51,15 @@ export interface PullRunSummary {
 	excluded: number;
 	downloadedNew: number;
 	downloadedUpdated: number;
+	restoredLocal: number;
+	movedToTrash: number;
+	destructiveDeferred: number;
 	alreadyCurrent: number;
 	unchanged: number;
 	backupsCreated: number;
 	errorCount: number;
 	files: string[];
+	trashedFiles: string[];
 }
 
 export interface PullRunResult extends PullRunSummary {

@@ -42,6 +42,8 @@ async function main(): Promise<void> {
 	assert(definitions.some((group) => group.heading === "Tracking"));
 	assert(definitions.every((group) => group.type === "group"));
 	assert.equal(tab.getControlValue("destination"), "GCS pull");
+	assert.equal(tab.getControlValue("pullMode"), "safe");
+	assert.equal(tab.getControlValue("allowDestructiveAutoPull"), false);
 	await tab.setControlValue("excludedFolders", " archive/\nprivate/ ");
 	assert.equal(plugin.settings.excludedFolders, "archive/\nprivate/");
 	await tab.setControlValue("destination", "  Imported notes  ");

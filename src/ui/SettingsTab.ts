@@ -1,5 +1,6 @@
 import { App, Notice, PluginSettingTab, SettingDefinitionItem } from "obsidian";
 import GoogleGcsPullPlugin from "../main";
+import { confirmDestructiveAutoPull, confirmMirrorMode } from "./ConfirmModal";
 
 type ControlKey =
 	| "oauthClientId"
@@ -7,8 +8,10 @@ type ControlKey =
 	| "prefix"
 	| "excludedFolders"
 	| "destination"
+	| "pullMode"
 	| "autoPull"
-	| "autoPullMinutes";
+	| "autoPullMinutes"
+	| "allowDestructiveAutoPull";
 
 export class GoogleGcsPullSettingsTab extends PluginSettingTab {
 	constructor(app: App, private readonly plugin: GoogleGcsPullPlugin) {
@@ -107,15 +110,24 @@ export class GoogleGcsPullSettingsTab extends PluginSettingTab {
 				heading: "Pull files",
 				items: [
 					{
+						name: "Pull behavior",
+						desc: "Safe pull retains local edits and files. Mirror tracked files uses GCS as the source of truth for files previously pulled by this plugin.",
+						control: {
+							type: "dropdown",
+							key: "pullMode",
+							options: { safe: "Safe pull", mirror: "Mirror tracked files" },
+						},
+					},
+					{
 						name: "Preview changes",
-						desc: "Scan GCS and calculate the exact number of new and updated files without writing anything.",
+						desc: "Scan GCS and calculate the exact changes without writing anything.",
 						render: (setting) => {
 							setting.addButton((button) => button.setButtonText("Preview").onClick(() => void this.preview()));
 						},
 					},
 					{
 						name: "Pull from GCS",
-						desc: "Scan again, back up locally changed files, then apply the remote versions.",
+						desc: "Scan again, preserve conflicts, then apply the selected pull behavior.",
 						render: (setting) => {
 							setting.addButton((button) =>
 								button
@@ -135,7 +147,8 @@ export class GoogleGcsPullSettingsTab extends PluginSettingTab {
 						name: "Latest preview",
 						desc: preview
 							? `${new Date(preview.at).toLocaleString()} · Scanned ${preview.scanned} · Excluded ${preview.excluded ?? 0} · To pull ${preview.toPull} ` +
-								`(${preview.newFiles} new, ${preview.updatedFiles} updated) · Unchanged ${preview.unchanged} · ` +
+								`(${preview.newFiles} new, ${preview.updatedFiles} updated, ${preview.localEditsToReplace ?? 0} local edits) · ` +
+								`To trash ${preview.toTrash ?? 0} · Unchanged ${preview.unchanged} · ` +
 								`Backups expected ${preview.backupExpected} · Errors ${preview.errorCount}`
 							: "No preview yet.",
 					},
@@ -143,23 +156,23 @@ export class GoogleGcsPullSettingsTab extends PluginSettingTab {
 						name: "Latest pull",
 						desc: run
 							? `${new Date(run.at).toLocaleString()} · Excluded ${run.excluded ?? 0} · Downloaded ${run.downloadedNew} new and ${run.downloadedUpdated} updated · ` +
+								`Restored ${run.restoredLocal ?? 0} · Trashed ${run.movedToTrash ?? 0} · Deferred ${run.destructiveDeferred ?? 0} · ` +
 								`Already current ${run.alreadyCurrent} · Unchanged ${run.unchanged} · Backups ${run.backupsCreated} · Errors ${run.errorCount}`
 							: "No pull yet.",
 					},
 					{
 						name: "Latest downloaded files",
 						render: (setting) => {
-							const list = setting.descEl.createDiv({ cls: "gcs-pull-file-list" });
-							list.tabIndex = 0;
-							list.setAttribute("role", "list");
-							list.setAttribute("aria-label", "Latest downloaded files");
-							for (const file of run?.files ?? []) {
-								const row = list.createDiv({ cls: "gcs-pull-file-row", text: file });
-								row.setAttribute("role", "listitem");
-								row.title = file;
-							}
+							this.renderFileList(setting.descEl, run?.files ?? [], "Latest downloaded files");
 						},
 						visible: () => Boolean(run?.files.length),
+					},
+					{
+						name: "Latest files moved to trash",
+						render: (setting) => {
+							this.renderFileList(setting.descEl, run?.trashedFiles ?? [], "Latest files moved to trash");
+						},
+						visible: () => Boolean(run?.trashedFiles?.length),
 					},
 					{
 						name: "Latest issues",
@@ -183,6 +196,12 @@ export class GoogleGcsPullSettingsTab extends PluginSettingTab {
 						control: { type: "number", key: "autoPullMinutes", min: 1, step: 1, defaultValue: 15 },
 						visible: () => settings.autoPull,
 					},
+					{
+						name: "Allow destructive auto-pull",
+						desc: "Automatically replace local edits and move tracked files to trash without asking each time.",
+						control: { type: "toggle", key: "allowDestructiveAutoPull" },
+						visible: () => settings.autoPull && settings.pullMode === "mirror",
+					},
 				],
 			},
 		];
@@ -195,18 +214,57 @@ export class GoogleGcsPullSettingsTab extends PluginSettingTab {
 
 	async setControlValue(key: string, value: unknown): Promise<void> {
 		if (!this.isControlKey(key)) return;
-		if (key === "autoPull") this.plugin.settings.autoPull = Boolean(value);
+		if (key === "pullMode") {
+			const mode = value === "mirror" ? "mirror" : "safe";
+			if (mode === "mirror" && this.plugin.settings.pullMode !== "mirror" && !(await confirmMirrorMode(this.app))) {
+				this.update();
+				return;
+			}
+			this.plugin.settings.pullMode = mode;
+			if (mode === "safe") this.plugin.settings.allowDestructiveAutoPull = false;
+		}
+		else if (key === "allowDestructiveAutoPull") {
+			const enabled = Boolean(value) && this.plugin.settings.pullMode === "mirror";
+			if (enabled && !this.plugin.settings.allowDestructiveAutoPull && !(await confirmDestructiveAutoPull(this.app))) {
+				this.update();
+				return;
+			}
+			this.plugin.settings.allowDestructiveAutoPull = enabled;
+		}
+		else if (key === "autoPull") this.plugin.settings.autoPull = Boolean(value);
 		else if (key === "autoPullMinutes") {
 			const minutes = Number(value);
 			this.plugin.settings.autoPullMinutes = Number.isFinite(minutes) ? Math.max(1, minutes) : 15;
 		}
 		else this.plugin.settings[key] = String(value).trim();
 		await this.plugin.saveSettings();
-		if (key === "autoPull") this.update();
+		if (["pullMode", "autoPull", "allowDestructiveAutoPull"].includes(key)) this.update();
 	}
 
 	private isControlKey(key: string): key is ControlKey {
-		return ["oauthClientId", "bucket", "prefix", "excludedFolders", "destination", "autoPull", "autoPullMinutes"].includes(key);
+		return [
+			"oauthClientId",
+			"bucket",
+			"prefix",
+			"excludedFolders",
+			"destination",
+			"pullMode",
+			"autoPull",
+			"autoPullMinutes",
+			"allowDestructiveAutoPull",
+		].includes(key);
+	}
+
+	private renderFileList(container: HTMLElement, files: string[], label: string): void {
+		const list = container.createDiv({ cls: "gcs-pull-file-list" });
+		list.tabIndex = 0;
+		list.setAttribute("role", "list");
+		list.setAttribute("aria-label", label);
+		for (const file of files) {
+			const row = list.createDiv({ cls: "gcs-pull-file-row", text: file });
+			row.setAttribute("role", "listitem");
+			row.title = file;
+		}
 	}
 
 	private async connect(): Promise<void> {

@@ -12,6 +12,32 @@ export class Notice {
 	hide(): void {}
 }
 
+export class TFile {}
+
+export class TFolder {}
+
+export class Modal {
+	contentEl = {};
+
+	constructor(_app: App) {}
+
+	open(): void {}
+
+	close(): void {}
+
+	setTitle(_title: string): this {
+		return this;
+	}
+}
+
+export class Setting {
+	constructor(_container: unknown) {}
+
+	addButton(_callback: (button: unknown) => void): this {
+		return this;
+	}
+}
+
 export class Plugin {
 	app: App;
 	_commands: Array<{ id: string; name: string }> = [];

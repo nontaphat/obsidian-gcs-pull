@@ -56,6 +56,8 @@ class FakeLocal implements LocalTarget {
 	files = new Map<string, ArrayBuffer>();
 	writes: string[] = [];
 	backups: string[] = [];
+	trashed: string[] = [];
+	trashFailures = new Set<string>();
 
 	resolve(remotePath: string): { path: string; collisionKey: string } {
 		const safe = safeRemotePath(remotePath);
@@ -83,6 +85,13 @@ class FakeLocal implements LocalTarget {
 		this.backups.push(backupPath);
 		this.files.set(backupPath, data);
 		return Promise.resolve(backupPath);
+	}
+
+	trash(path: string): Promise<void> {
+		if (this.trashFailures.has(path)) return Promise.reject(new Error(`Cannot trash ${path}`));
+		this.trashed.push(path);
+		this.files.delete(path);
+		return Promise.resolve();
 	}
 }
 
@@ -213,6 +222,24 @@ await test("a local edit is retained while the remote generation is unchanged", 
 	assert.equal(local.writes.length, 0);
 });
 
+await test("mirror mode backs up and restores a local edit when the remote generation is unchanged", async () => {
+	const remote = new FakeRemote();
+	remote.set("a.md", "remote-a", 1);
+	const local = new FakeLocal();
+	const safe = new PullEngine(remote, local);
+	const first = await safe.apply(await safe.preview({}));
+	local.files.set("a.md", encode("local edit"));
+	const mirror = new PullEngine(remote, local, () => new Date(), () => false, [], "mirror");
+	const plan = await mirror.preview(first.baseline);
+	assert.equal(plan.localEditsToReplace, 1);
+	assert.equal(plan.backupExpected, 1);
+	const result = await mirror.apply(plan);
+	assert.equal(result.restoredLocal, 1);
+	assert.equal(result.backupsCreated, 1);
+	assert.equal(decode(local.files.get("a.md")!), "remote-a");
+	assert.equal(decode(local.files.get(local.backups[0]!)!), "local edit");
+});
+
 await test("a remote-only update overwrites without creating a conflict backup", async () => {
 	const remote = new FakeRemote();
 	remote.set("a.md", "v1", 1);
@@ -257,6 +284,97 @@ await test("remote deletion never deletes the retained local file or baseline of
 	assert(local.files.has("b.md"));
 	assert(second.baseline["a.md"]);
 	assert.equal(second.baseline["b.md"], undefined);
+});
+
+await test("mirror mode trashes only previously tracked files removed from GCS", async () => {
+	const remote = new FakeRemote();
+	remote.set("tracked.md", "tracked", 1);
+	const local = new FakeLocal();
+	local.files.set("local-only.md", encode("keep"));
+	const safe = new PullEngine(remote, local);
+	const first = await safe.apply(await safe.preview({}));
+	remote.objects.delete("tracked.md");
+	const mirror = new PullEngine(remote, local, () => new Date(), () => false, [], "mirror");
+	const plan = await mirror.preview(first.baseline);
+	assert.equal(plan.toTrash, 1);
+	const result = await mirror.apply(plan);
+	assert.equal(result.movedToTrash, 1);
+	assert.deepEqual(local.trashed, ["tracked.md"]);
+	assert(!local.files.has("tracked.md"));
+	assert(local.files.has("local-only.md"));
+	assert.equal(result.baseline["tracked.md"], undefined);
+});
+
+await test("mirror changes can be deferred for automatic pulls", async () => {
+	const remote = new FakeRemote();
+	remote.set("edited.md", "remote", 1);
+	remote.set("deleted.md", "delete me", 1);
+	const local = new FakeLocal();
+	const safe = new PullEngine(remote, local);
+	const first = await safe.apply(await safe.preview({}));
+	local.files.set("edited.md", encode("local edit"));
+	remote.objects.delete("deleted.md");
+	remote.downloads.length = 0;
+	const mirror = new PullEngine(remote, local, () => new Date(), () => false, [], "mirror");
+	const plan = await mirror.preview(first.baseline);
+	const result = await mirror.apply(plan, undefined, false);
+	assert.equal(result.destructiveDeferred, 2);
+	assert.equal(decode(local.files.get("edited.md")!), "local edit");
+	assert(local.files.has("deleted.md"));
+	assert.equal(local.trashed.length, 0);
+	assert.equal(remote.downloads.length, 0);
+	assert(result.baseline["edited.md"]);
+	assert(result.baseline["deleted.md"]);
+});
+
+await test("mirror mode blocks trash when preview contains path errors", async () => {
+	const remote = new FakeRemote();
+	remote.set("tracked.md", "tracked", 1);
+	const local = new FakeLocal();
+	const safe = new PullEngine(remote, local);
+	const first = await safe.apply(await safe.preview({}));
+	remote.objects.delete("tracked.md");
+	remote.set("bad//path.md", "bad", 1);
+	const mirror = new PullEngine(remote, local, () => new Date(), () => false, [], "mirror");
+	const plan = await mirror.preview(first.baseline);
+	assert.equal(plan.errorCount, 1);
+	assert.equal(plan.toTrash, 1);
+	const result = await mirror.apply(plan);
+	assert.equal(result.movedToTrash, 0);
+	assert.equal(result.destructiveDeferred, 1);
+	assert(local.files.has("tracked.md"));
+	assert(result.baseline["tracked.md"]);
+});
+
+await test("mirror mode retains excluded tracked files", async () => {
+	const local = new FakeLocal();
+	local.files.set("archive/a.md", encode("keep"));
+	const prior = { generation: "1", localHash: "hash" };
+	const mirror = new PullEngine(new FakeRemote(), local, () => new Date(), () => false, ["archive"], "mirror");
+	const plan = await mirror.preview({ "archive/a.md": prior });
+	assert.equal(plan.toTrash, 0);
+	const result = await mirror.apply(plan);
+	assert(local.files.has("archive/a.md"));
+	assert.deepEqual(result.baseline["archive/a.md"], prior);
+});
+
+await test("mirror mode stops after a trash failure and retains pending baselines", async () => {
+	const local = new FakeLocal();
+	local.files.set("a.md", encode("a"));
+	local.files.set("b.md", encode("b"));
+	local.trashFailures.add("a.md");
+	const prior = {
+		"a.md": { generation: "1", localHash: "a-hash" },
+		"b.md": { generation: "1", localHash: "b-hash" },
+	};
+	const mirror = new PullEngine(new FakeRemote(), local, () => new Date(), () => false, [], "mirror");
+	const result = await mirror.apply(await mirror.preview(prior));
+	assert.equal(result.movedToTrash, 0);
+	assert.equal(result.destructiveDeferred, 2);
+	assert.equal(result.errorCount, 1);
+	assert(local.files.has("a.md"));
+	assert(local.files.has("b.md"));
+	assert.deepEqual(result.baseline, prior);
 });
 
 await test("error totals are not truncated", async () => {
